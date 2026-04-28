@@ -1,1 +1,0 @@
-After building, put ZaloMulti.exe here as release/ZaloMulti.exe
