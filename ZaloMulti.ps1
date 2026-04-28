@@ -1,20 +1,20 @@
 # Koha Zalo Multi - Personal Launcher
-# Author: koha2002
+# Version: 1.0.2
 # Purpose: Run multiple isolated Zalo Desktop profiles without creating extra Windows users.
-# Note: This script does not patch, modify, or crack Zalo. It only starts Zalo.exe with separate USERPROFILE/APPDATA/LOCALAPPDATA paths.
+# This script does not patch or modify Zalo.exe. It only starts Zalo.exe with separate environment paths.
 
 param(
     [string]$LaunchProfile = "",
     [switch]$CheckUpdateOnly
 )
 
-Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms
+Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, System.Windows.Forms, Microsoft.VisualBasic
 
 # =============================
 # CONFIG
 # =============================
 $Global:AppName = "Koha Zalo Multi"
-$Global:Version = "1.0.0"
+$Global:Version = "1.0.2"
 $Global:Owner = "koha2002"
 $Global:Repo = "KohaZaloMulti"
 $Global:Branch = "main"
@@ -35,7 +35,7 @@ $Global:StatusText = $null
 # =============================
 function Ensure-Directory {
     param([string]$Path)
-    if (-not (Test-Path $Path)) {
+    if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
 }
@@ -52,7 +52,7 @@ function Show-ErrorBox {
 
 function Set-Status {
     param([string]$Message)
-    if ($Global:StatusText) {
+    if ($null -ne $Global:StatusText) {
         $Global:StatusText.Text = $Message
     }
 }
@@ -61,11 +61,15 @@ function Load-Config {
     Ensure-Directory $Global:DataRoot
     Ensure-Directory $Global:ProfileRoot
 
-    if (Test-Path $Global:ConfigFile) {
+    if (Test-Path -LiteralPath $Global:ConfigFile) {
         try {
-            $cfg = Get-Content $Global:ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
-            if ($cfg.ProfileRoot) { $Global:ProfileRoot = $cfg.ProfileRoot }
-        } catch { }
+            $cfg = Get-Content -LiteralPath $Global:ConfigFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($cfg.ProfileRoot) {
+                $Global:ProfileRoot = [string]$cfg.ProfileRoot
+            }
+        } catch {
+            # Ignore broken config and continue with defaults.
+        }
     }
 
     Ensure-Directory $Global:ProfileRoot
@@ -91,7 +95,9 @@ function Find-ZaloExe {
     )
 
     foreach ($candidate in $candidates) {
-        if (Test-Path $candidate) { return $candidate }
+        if (Test-Path -LiteralPath $candidate) {
+            return $candidate
+        }
     }
 
     return ""
@@ -99,6 +105,8 @@ function Find-ZaloExe {
 
 function Get-SafeName {
     param([string]$Name)
+    if ($null -eq $Name) { return "" }
+
     $safe = $Name.Trim()
     $invalid = [System.IO.Path]::GetInvalidFileNameChars()
     foreach ($ch in $invalid) {
@@ -110,7 +118,7 @@ function Get-SafeName {
 
 function Get-Profiles {
     Ensure-Directory $Global:ProfileRoot
-    return @(Get-ChildItem -Path $Global:ProfileRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
+    return @(Get-ChildItem -LiteralPath $Global:ProfileRoot -Directory -ErrorAction SilentlyContinue | Sort-Object Name)
 }
 
 function Get-ProfilePath {
@@ -120,14 +128,16 @@ function Get-ProfilePath {
 
 function Is-ProfileRunning {
     param([string]$Name)
+
     $profilePath = Get-ProfilePath $Name
     $pidFile = Join-Path $profilePath "pid.txt"
-    if (-not (Test-Path $pidFile)) { return $false }
+    if (-not (Test-Path -LiteralPath $pidFile)) { return $false }
 
     try {
-        $pidValue = (Get-Content $pidFile -Raw -ErrorAction Stop).Trim()
+        $pidValue = (Get-Content -LiteralPath $pidFile -Raw -ErrorAction Stop).Trim()
         if (-not $pidValue) { return $false }
-        return [bool](Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue)
+        $proc = Get-Process -Id ([int]$pidValue) -ErrorAction SilentlyContinue
+        return ($null -ne $proc)
     } catch {
         return $false
     }
@@ -141,13 +151,13 @@ function New-ZaloProfile {
 
     $safeName = Get-SafeName $Name
     if (-not $safeName) {
-        Show-ErrorBox "Tên profile không được để trống."
+        Show-ErrorBox "Profile name cannot be empty."
         return
     }
 
     $profilePath = Get-ProfilePath $safeName
-    if (Test-Path $profilePath) {
-        Show-ErrorBox "Profile '$safeName' đã tồn tại."
+    if (Test-Path -LiteralPath $profilePath) {
+        Show-ErrorBox "Profile already exists: $safeName"
         return
     }
 
@@ -156,7 +166,7 @@ function New-ZaloProfile {
     Ensure-Directory (Join-Path $profilePath "AppData\Local")
 
     Refresh-ProfileList
-    Set-Status "Đã tạo profile: $safeName"
+    Set-Status "Created profile: $safeName"
 }
 
 function Remove-ZaloProfile {
@@ -165,26 +175,21 @@ function Remove-ZaloProfile {
     if (-not $Name) { return }
 
     if (Is-ProfileRunning $Name) {
-        Show-ErrorBox "Profile '$Name' đang chạy. Hãy đóng Zalo trước khi xóa."
+        Show-ErrorBox "Profile is running. Close Zalo before deleting: $Name"
         return
     }
 
-    $confirm = [System.Windows.MessageBox]::Show(
-        "Xóa profile '$Name'?`n`nThao tác này sẽ xóa dữ liệu Zalo Desktop local của profile này trong thư mục:`n$Global:ProfileRoot",
-        $Global:AppName,
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Warning
-    )
-
+    $message = "Delete profile '$Name'?`n`nThis will remove local data stored under:`n$Global:ProfileRoot"
+    $confirm = [System.Windows.MessageBox]::Show($message, $Global:AppName, [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Warning)
     if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     $profilePath = Get-ProfilePath $Name
-    if (Test-Path $profilePath) {
-        Remove-Item $profilePath -Recurse -Force
+    if (Test-Path -LiteralPath $profilePath) {
+        Remove-Item -LiteralPath $profilePath -Recurse -Force
     }
 
     Refresh-ProfileList
-    Set-Status "Đã xóa profile: $Name"
+    Set-Status "Deleted profile: $Name"
 }
 
 function Start-ZaloProfile {
@@ -192,7 +197,7 @@ function Start-ZaloProfile {
 
     $zaloExe = Find-ZaloExe
     if (-not $zaloExe) {
-        Show-ErrorBox "Không tìm thấy Zalo.exe. Hãy cài Zalo PC trước."
+        Show-ErrorBox "Zalo.exe was not found. Please install Zalo PC first."
         return
     }
 
@@ -209,9 +214,8 @@ function Start-ZaloProfile {
     Ensure-Directory $localPath
     Ensure-Directory $zaloDataPath
 
-    # Give each profile a stable local device identity file if it does not exist yet.
     $storageJson = Join-Path $zaloDataPath "storage.json"
-    if (-not (Test-Path $storageJson)) {
+    if (-not (Test-Path -LiteralPath $storageJson)) {
         $deviceId = [System.Guid]::NewGuid().ToString().ToUpper()
         $storage = @{ deviceId = $deviceId } | ConvertTo-Json -Compress
         $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
@@ -228,27 +232,21 @@ function Start-ZaloProfile {
 
     try {
         $proc = [System.Diagnostics.Process]::Start($psi)
-        if ($proc) {
-            $proc.Id | Set-Content (Join-Path $profilePath "pid.txt") -Force -Encoding ASCII
-            Set-Status "Đã mở Zalo: $safeName"
+        if ($null -ne $proc) {
+            $proc.Id | Set-Content -LiteralPath (Join-Path $profilePath "pid.txt") -Force -Encoding ASCII
+            Set-Status "Opened Zalo profile: $safeName"
         }
     } catch {
-        Show-ErrorBox "Không thể mở Zalo cho profile '$safeName'.`n`n$($_.Exception.Message)"
+        Show-ErrorBox "Cannot open Zalo profile '$safeName'.`n`n$($_.Exception.Message)"
     }
 }
 
 function Stop-AllZalo {
-    $confirm = [System.Windows.MessageBox]::Show(
-        "Đóng tất cả tiến trình Zalo.exe đang chạy?",
-        $Global:AppName,
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-
+    $confirm = [System.Windows.MessageBox]::Show("Close all running Zalo.exe processes?", $Global:AppName, [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
     if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     Get-Process "Zalo" -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Set-Status "Đã yêu cầu đóng tất cả Zalo.exe"
+    Set-Status "Requested to close all Zalo.exe processes."
     Refresh-ProfileList
 }
 
@@ -258,37 +256,37 @@ function Export-ZaloProfile {
     if (-not $Name) { return }
 
     $profilePath = Get-ProfilePath $Name
-    if (-not (Test-Path $profilePath)) { return }
+    if (-not (Test-Path -LiteralPath $profilePath)) { return }
 
     $dialog = New-Object Microsoft.Win32.SaveFileDialog
-    $dialog.Title = "Sao lưu profile"
+    $dialog.Title = "Export profile"
     $dialog.Filter = "Koha Zalo Profile (*.kzp)|*.kzp|Zip file (*.zip)|*.zip"
     $dialog.FileName = "$Name-$(Get-Date -Format 'yyyyMMdd-HHmmss').kzp"
 
     if ($dialog.ShowDialog() -eq $true) {
         try {
             Compress-Archive -Path (Join-Path $profilePath "*") -DestinationPath $dialog.FileName -Force
-            Show-Info "Đã sao lưu profile:`n$($dialog.FileName)"
+            Show-Info "Exported profile:`n$($dialog.FileName)"
         } catch {
-            Show-ErrorBox "Không thể sao lưu profile.`n`n$($_.Exception.Message)"
+            Show-ErrorBox "Cannot export profile.`n`n$($_.Exception.Message)"
         }
     }
 }
 
 function Import-ZaloProfile {
     $open = New-Object Microsoft.Win32.OpenFileDialog
-    $open.Title = "Nhập profile"
+    $open.Title = "Import profile"
     $open.Filter = "Koha Zalo Profile (*.kzp;*.zip)|*.kzp;*.zip|All files (*.*)|*.*"
 
     if ($open.ShowDialog() -ne $true) { return }
 
-    $name = [Microsoft.VisualBasic.Interaction]::InputBox("Đặt tên cho profile nhập vào:", $Global:AppName, "Imported")
+    $name = [Microsoft.VisualBasic.Interaction]::InputBox("Enter imported profile name:", $Global:AppName, "Imported")
     $safeName = Get-SafeName $name
     if (-not $safeName) { return }
 
     $dest = Get-ProfilePath $safeName
-    if (Test-Path $dest) {
-        Show-ErrorBox "Profile '$safeName' đã tồn tại."
+    if (Test-Path -LiteralPath $dest) {
+        Show-ErrorBox "Profile already exists: $safeName"
         return
     }
 
@@ -296,10 +294,12 @@ function Import-ZaloProfile {
         Ensure-Directory $dest
         Expand-Archive -Path $open.FileName -DestinationPath $dest -Force
         Refresh-ProfileList
-        Show-Info "Đã nhập profile: $safeName"
+        Show-Info "Imported profile: $safeName"
     } catch {
-        if (Test-Path $dest) { Remove-Item $dest -Recurse -Force -ErrorAction SilentlyContinue }
-        Show-ErrorBox "Không thể nhập profile.`n`n$($_.Exception.Message)"
+        if (Test-Path -LiteralPath $dest) {
+            Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        Show-ErrorBox "Cannot import profile.`n`n$($_.Exception.Message)"
     }
 }
 
@@ -319,9 +319,9 @@ function Create-DesktopShortcut {
         $shortcut.WindowStyle = 7
         $shortcut.Description = "Open $Name with $Global:AppName"
         $shortcut.Save()
-        Show-Info "Đã tạo shortcut ngoài Desktop cho profile '$Name'."
+        Show-Info "Created desktop shortcut for profile: $Name"
     } catch {
-        Show-ErrorBox "Không thể tạo shortcut.`n`n$($_.Exception.Message)"
+        Show-ErrorBox "Cannot create shortcut.`n`n$($_.Exception.Message)"
     }
 }
 
@@ -332,9 +332,8 @@ function Open-ProfilePowerShell {
     if (-not $safeName) { return }
 
     $profilePath = Get-ProfilePath $safeName
-    $appDataPath = Join-Path $profilePath "AppData"
-    $roamingPath = Join-Path $appDataPath "Roaming"
-    $localPath = Join-Path $appDataPath "Local"
+    $roamingPath = Join-Path $profilePath "AppData\Roaming"
+    $localPath = Join-Path $profilePath "AppData\Local"
 
     Ensure-Directory $profilePath
     Ensure-Directory $roamingPath
@@ -345,15 +344,17 @@ function Open-ProfilePowerShell {
         $psi.FileName = "powershell.exe"
         $psi.UseShellExecute = $false
         $psi.WorkingDirectory = $profilePath
-        $psi.Arguments = "-NoExit -NoProfile -Command `$host.UI.RawUI.WindowTitle = 'PowerShell - $safeName'; Write-Host 'Koha Zalo Multi profile: $safeName'; Write-Host 'USERPROFILE=' `$env:USERPROFILE; Write-Host 'APPDATA=' `$env:APPDATA; Write-Host 'LOCALAPPDATA=' `$env:LOCALAPPDATA"
+        $cmd = "`$host.UI.RawUI.WindowTitle = 'PowerShell - $safeName'; Write-Host 'Koha Zalo Multi profile: $safeName'; Write-Host 'USERPROFILE=' `$env:USERPROFILE; Write-Host 'APPDATA=' `$env:APPDATA; Write-Host 'LOCALAPPDATA=' `$env:LOCALAPPDATA"
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($cmd))
+        $psi.Arguments = "-NoExit -NoProfile -EncodedCommand $encoded"
         $psi.EnvironmentVariables["USERPROFILE"] = $profilePath
         $psi.EnvironmentVariables["APPDATA"] = $roamingPath
         $psi.EnvironmentVariables["LOCALAPPDATA"] = $localPath
 
         [System.Diagnostics.Process]::Start($psi) | Out-Null
-        Set-Status "Đã mở PowerShell cho profile: $safeName"
+        Set-Status "Opened PowerShell for profile: $safeName"
     } catch {
-        Show-ErrorBox "Không thể mở PowerShell cho profile '$safeName'.`n`n$($_.Exception.Message)"
+        Show-ErrorBox "Cannot open PowerShell for profile '$safeName'.`n`n$($_.Exception.Message)"
     }
 }
 
@@ -386,25 +387,20 @@ function Install-SelfUpdate {
     $remoteVersion = Get-RemoteVersion
     if (-not $remoteVersion) {
         if (-not $SilentCheck) {
-            Show-ErrorBox "Không kiểm tra được version từ GitHub.`n`nHãy tạo file version.txt trong repo:`n$($Global:Owner)/$($Global:Repo)"
+            Show-ErrorBox "Cannot check version from GitHub.`n`nCreate version.txt in repo: $($Global:Owner)/$($Global:Repo)"
         }
         return
     }
 
     if (-not (Compare-VersionString -Remote $remoteVersion -Local $Global:Version)) {
         if (-not $SilentCheck) {
-            Show-Info "Bạn đang dùng bản mới nhất.`n`nPhiên bản hiện tại: $Global:Version"
+            Show-Info "You are using the latest version.`n`nCurrent version: $Global:Version"
         }
         return
     }
 
-    $confirm = [System.Windows.MessageBox]::Show(
-        "Có bản mới: $remoteVersion`nBản hiện tại: $Global:Version`n`nCập nhật ngay?",
-        $Global:AppName,
-        [System.Windows.MessageBoxButton]::YesNo,
-        [System.Windows.MessageBoxImage]::Question
-    )
-
+    $message = "New version found: $remoteVersion`nCurrent version: $Global:Version`n`nUpdate now?"
+    $confirm = [System.Windows.MessageBox]::Show($message, $Global:AppName, [System.Windows.MessageBoxButton]::YesNo, [System.Windows.MessageBoxImage]::Question)
     if ($confirm -ne [System.Windows.MessageBoxResult]::Yes) { return }
 
     $remoteScriptUrl = "$($Global:RemoteBase)/KohaZaloMulti.ps1"
@@ -413,21 +409,21 @@ function Install-SelfUpdate {
 
     try {
         Invoke-WebRequest -Uri $remoteScriptUrl -OutFile $tempScript -UseBasicParsing -TimeoutSec 30
-        $downloaded = Get-Content $tempScript -Raw -Encoding UTF8
+        $downloaded = Get-Content -LiteralPath $tempScript -Raw -Encoding UTF8
 
         if ($downloaded.Length -lt 5000 -or $downloaded -notmatch "Koha Zalo Multi") {
-            throw "File tải về không giống script hợp lệ."
+            throw "Downloaded file does not look valid."
         }
 
-        Copy-Item $Global:ScriptPath $backupScript -Force
-        Copy-Item $tempScript $Global:ScriptPath -Force
-        Remove-Item $tempScript -Force -ErrorAction SilentlyContinue
+        Copy-Item -LiteralPath $Global:ScriptPath -Destination $backupScript -Force
+        Copy-Item -LiteralPath $tempScript -Destination $Global:ScriptPath -Force
+        Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
 
-        Show-Info "Đã cập nhật lên bản $remoteVersion.`nỨng dụng sẽ tự mở lại."
-        if ($Global:Window) { $Global:Window.Close() }
+        Show-Info "Updated to version $remoteVersion.`nThe app will restart now."
+        if ($null -ne $Global:Window) { $Global:Window.Close() }
         Start-Process "powershell.exe" -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$Global:ScriptPath`"" -WorkingDirectory $Global:AppDir
     } catch {
-        Show-ErrorBox "Cập nhật thất bại.`n`n$($_.Exception.Message)"
+        Show-ErrorBox "Update failed.`n`n$($_.Exception.Message)"
     }
 }
 
@@ -438,7 +434,7 @@ function New-Button {
     param(
         [string]$Text,
         [scriptblock]$OnClick,
-        [int]$Width = 130
+        [int]$Width = 120
     )
 
     $btn = New-Object System.Windows.Controls.Button
@@ -452,20 +448,20 @@ function New-Button {
 }
 
 function Get-SelectedProfileName {
-    if (-not $Global:ProfileList) { return "" }
-    if (-not $Global:ProfileList.SelectedItem) { return "" }
+    if ($null -eq $Global:ProfileList) { return "" }
+    if ($null -eq $Global:ProfileList.SelectedItem) { return "" }
     return [string]$Global:ProfileList.SelectedItem.Tag
 }
 
 function Refresh-ProfileList {
-    if (-not $Global:ProfileList) { return }
+    if ($null -eq $Global:ProfileList) { return }
 
     $Global:ProfileList.Items.Clear()
     $profiles = Get-Profiles
 
     foreach ($profile in $profiles) {
         $running = Is-ProfileRunning $profile.Name
-        $status = if ($running) { "Đang chạy" } else { "Sẵn sàng" }
+        $status = if ($running) { "Running" } else { "Ready" }
 
         $item = New-Object System.Windows.Controls.ListBoxItem
         $item.Tag = $profile.Name
@@ -475,7 +471,7 @@ function Refresh-ProfileList {
         $Global:ProfileList.Items.Add($item) | Out-Null
     }
 
-    Set-Status "Tổng profile: $($profiles.Count) | Thư mục: $Global:ProfileRoot"
+    Set-Status "Profiles: $($profiles.Count) | Folder: $Global:ProfileRoot"
 }
 
 function Start-AutoUpdateCheck {
@@ -484,20 +480,22 @@ function Start-AutoUpdateCheck {
         $timer.Interval = [TimeSpan]::FromSeconds(2)
         $timer.Add_Tick({
             $this.Stop()
-            Set-Status "Đang kiểm tra cập nhật..."
+            Set-Status "Checking for updates..."
             Install-SelfUpdate -SilentCheck
-            Set-Status "Sẵn sàng"
+            Set-Status "Ready"
         })
         $timer.Start()
-    } catch { }
+    } catch {
+        # Ignore auto update check errors.
+    }
 }
 
 function Build-UI {
     $Global:Window = New-Object System.Windows.Window
     $Global:Window.Title = "$Global:AppName v$Global:Version"
-    $Global:Window.Width = 760
+    $Global:Window.Width = 790
     $Global:Window.Height = 560
-    $Global:Window.MinWidth = 680
+    $Global:Window.MinWidth = 720
     $Global:Window.MinHeight = 480
     $Global:Window.WindowStartupLocation = "CenterScreen"
 
@@ -517,7 +515,7 @@ function Build-UI {
     $root.Children.Add($title) | Out-Null
 
     $subtitle = New-Object System.Windows.Controls.TextBlock
-    $subtitle.Text = "Chạy nhiều Zalo Desktop bằng profile dữ liệu riêng, không cần tạo thêm user Windows."
+    $subtitle.Text = "Run multiple Zalo Desktop profiles without creating extra Windows users."
     $subtitle.Margin = "0,34,0,12"
     $subtitle.Opacity = 0.75
     [System.Windows.Controls.Grid]::SetRow($subtitle, 0)
@@ -527,51 +525,51 @@ function Build-UI {
     $toolbar.Margin = "0,8,0,12"
     [System.Windows.Controls.Grid]::SetRow($toolbar, 1)
 
-    $toolbar.Children.Add((New-Button "Thêm profile" {
-        $name = [Microsoft.VisualBasic.Interaction]::InputBox("Nhập tên profile:", $Global:AppName, "Zalo 1")
+    $toolbar.Children.Add((New-Button "Add profile" {
+        $name = [Microsoft.VisualBasic.Interaction]::InputBox("Enter profile name:", $Global:AppName, "Zalo 1")
         if ($name) { New-ZaloProfile $name }
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Mở Zalo" {
+    $toolbar.Children.Add((New-Button "Open Zalo" {
         $name = Get-SelectedProfileName
-        if (-not $name) { Show-ErrorBox "Hãy chọn một profile."; return }
+        if (-not $name) { Show-ErrorBox "Please select a profile."; return }
         Start-ZaloProfile $name
         Refresh-ProfileList
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Shortcut" {
-        $name = Get-SelectedProfileName
-        if (-not $name) { Show-ErrorBox "Hãy chọn một profile."; return }
-        Create-DesktopShortcut $name
-    })) | Out-Null
-
     $toolbar.Children.Add((New-Button "PowerShell" {
         $name = Get-SelectedProfileName
-        if (-not $name) { Show-ErrorBox "Hãy chọn một profile."; return }
+        if (-not $name) { Show-ErrorBox "Please select a profile."; return }
         Open-ProfilePowerShell $name
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Sao lưu" {
+    $toolbar.Children.Add((New-Button "Shortcut" {
         $name = Get-SelectedProfileName
-        if (-not $name) { Show-ErrorBox "Hãy chọn một profile."; return }
+        if (-not $name) { Show-ErrorBox "Please select a profile."; return }
+        Create-DesktopShortcut $name
+    })) | Out-Null
+
+    $toolbar.Children.Add((New-Button "Export" {
+        $name = Get-SelectedProfileName
+        if (-not $name) { Show-ErrorBox "Please select a profile."; return }
         Export-ZaloProfile $name
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Nhập" {
+    $toolbar.Children.Add((New-Button "Import" {
         Import-ZaloProfile
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Xóa" {
+    $toolbar.Children.Add((New-Button "Delete" {
         $name = Get-SelectedProfileName
-        if (-not $name) { Show-ErrorBox "Hãy chọn một profile."; return }
+        if (-not $name) { Show-ErrorBox "Please select a profile."; return }
         Remove-ZaloProfile $name
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Đóng tất cả" {
+    $toolbar.Children.Add((New-Button "Close all" {
         Stop-AllZalo
     })) | Out-Null
 
-    $toolbar.Children.Add((New-Button "Cập nhật" {
+    $toolbar.Children.Add((New-Button "Update" {
         Install-SelfUpdate
     })) | Out-Null
 
@@ -582,7 +580,10 @@ function Build-UI {
     $Global:ProfileList.FontSize = 15
     $Global:ProfileList.Add_MouseDoubleClick({
         $name = Get-SelectedProfileName
-        if ($name) { Start-ZaloProfile $name; Refresh-ProfileList }
+        if ($name) {
+            Start-ZaloProfile $name
+            Refresh-ProfileList
+        }
     })
     [System.Windows.Controls.Grid]::SetRow($Global:ProfileList, 2)
     $root.Children.Add($Global:ProfileList) | Out-Null
@@ -591,7 +592,7 @@ function Build-UI {
     [System.Windows.Controls.Grid]::SetRow($bottom, 3)
 
     $Global:StatusText = New-Object System.Windows.Controls.TextBlock
-    $Global:StatusText.Text = "Sẵn sàng"
+    $Global:StatusText.Text = "Ready"
     $Global:StatusText.Opacity = 0.72
     $Global:StatusText.TextWrapping = "Wrap"
     [System.Windows.Controls.DockPanel]::SetDock($Global:StatusText, "Left")
