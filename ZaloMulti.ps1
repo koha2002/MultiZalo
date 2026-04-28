@@ -1,5 +1,5 @@
-﻿# ZaloMulti - Personal Multi Profile Launcher
-# Version: 1.2.5
+# ZaloMulti - Personal Multi Profile Launcher
+# Version: 1.2.6
 # Author: Nguyễn Lê Khánh Hòa
 # Website: https://koha.io.vn
 #
@@ -42,7 +42,7 @@ function Get-AppBaseDirectory {
 # CONFIG
 # =============================
 $Global:AppName = "ZaloMulti"
-$Global:Version = "1.2.5"
+$Global:Version = "1.2.7"
 $Global:AuthorName = "Nguyễn Lê Khánh Hòa"
 $Global:WebsiteUrl = "https://koha.io.vn"
 
@@ -266,13 +266,17 @@ function Open-Website {
 function Get-RunningAppPath {
     try {
         $p = ""
+
         try { $p = [Environment]::ProcessPath } catch { }
+
         if (-not $p) {
             try { $p = [System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName } catch { }
         }
+
         if (-not $p -and $MyInvocation.MyCommand.Path) {
             $p = $MyInvocation.MyCommand.Path
         }
+
         return [string]$p
     } catch {
         return ""
@@ -914,12 +918,41 @@ function Create-ProfileShortcut {
     }
 }
 
+function Refresh-DesktopShortcuts {
+    try {
+        if (-not (Test-IsPackagedExe)) { return }
+
+        $currentExe = Get-RunningAppPath
+        if (-not $currentExe -or -not (Test-Path -LiteralPath $currentExe)) { return }
+
+        $desktop = [Environment]::GetFolderPath("Desktop")
+        if (-not $desktop -or -not (Test-Path -LiteralPath $desktop)) { return }
+
+        $shell = New-Object -ComObject WScript.Shell
+        $shortcuts = Get-ChildItem -LiteralPath $desktop -Filter "*.lnk" -ErrorAction SilentlyContinue
+
+        foreach ($lnk in $shortcuts) {
+            try {
+                $sc = $shell.CreateShortcut($lnk.FullName)
+                if ($sc.TargetPath -and ([System.IO.Path]::GetFileName($sc.TargetPath) -ieq $Global:ExeName)) {
+                    $sc.TargetPath = $currentExe
+                    $sc.IconLocation = "$currentExe,0"
+                    $sc.WorkingDirectory = Split-Path -Parent $currentExe
+                    $sc.Save()
+                }
+            } catch { }
+        }
+    } catch { }
+}
+
 # =============================
 # EXE AUTO UPDATE
 # =============================
 function Get-RemoteVersion {
     try {
-        return (Invoke-RestMethod -Uri $Global:RemoteVersionUrl -UseBasicParsing -TimeoutSec 10).Trim()
+        $stamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+        $url = "$($Global:RemoteVersionUrl)?t=$stamp"
+        return (Invoke-RestMethod -Uri $url -UseBasicParsing -TimeoutSec 15).Trim()
     } catch {
         return ""
     }
@@ -942,7 +975,6 @@ function Start-ExeReplacement {
         [string]$NewExe
     )
 
-    
     if (-not $CurrentExe -or -not (Test-Path -LiteralPath $CurrentExe)) {
         throw "Cannot determine current exe path for update."
     }
@@ -951,25 +983,59 @@ function Start-ExeReplacement {
         throw "Downloaded update file was not found."
     }
 
-$updaterBat = Join-Path $env:TEMP "ZaloMulti-Updater.bat"
+    $currentPid = [System.Diagnostics.Process]::GetCurrentProcess().Id
     $appDir = Split-Path -Parent $CurrentExe
+    if (-not $appDir) {
+        throw "Cannot determine app directory for update."
+    }
 
-    $bat = @"
+    $updaterCmd = Join-Path $env:TEMP ("ZaloMulti-Updater-" + [Guid]::NewGuid().ToString("N") + ".cmd")
+    $logFile = Join-Path $env:TEMP "ZaloMulti-Updater.log"
+
+    $cmd = @"
 @echo off
-setlocal
-timeout /t 2 /nobreak > nul
-taskkill /f /im "$($Global:ExeName)" > nul 2>&1
-timeout /t 1 /nobreak > nul
-copy /y "$NewExe" "$CurrentExe" > nul
+setlocal enableextensions
+echo [%date% %time%] Starting update > "$logFile"
+echo CurrentExe=$CurrentExe >> "$logFile"
+echo NewExe=$NewExe >> "$logFile"
+echo PID=$currentPid >> "$logFile"
+
+for /l %%i in (1,1,60) do (
+    tasklist /fi "PID eq $currentPid" | find "$currentPid" > nul
+    if errorlevel 1 goto process_stopped
+    timeout /t 1 /nobreak > nul
+)
+
+:process_stopped
+echo [%date% %time%] Process stopped, replacing exe >> "$logFile"
+
+if not exist "$NewExe" (
+    echo New exe not found >> "$logFile"
+    start "" "$CurrentExe"
+    goto cleanup
+)
+
+copy /y "$NewExe" "$CurrentExe" >> "$logFile" 2>&1
+if errorlevel 1 (
+    echo Copy failed >> "$logFile"
+    start "" "$CurrentExe"
+    goto cleanup
+)
+
 del /f /q "$NewExe" > nul 2>&1
+
+echo [%date% %time%] Starting updated app >> "$logFile"
 start "" "$CurrentExe"
+
+:cleanup
 del /f /q "%~f0" > nul 2>&1
+endlocal
 "@
 
     $ansi = New-Object System.Text.ASCIIEncoding
-    [System.IO.File]::WriteAllText($updaterBat, $bat, $ansi)
+    [System.IO.File]::WriteAllText($updaterCmd, $cmd, $ansi)
 
-    Start-Process "cmd.exe" -ArgumentList "/c `"$updaterBat`"" -WorkingDirectory $appDir -WindowStyle Hidden
+    Start-Process -FilePath "cmd.exe" -ArgumentList "/c `"$updaterCmd`"" -WorkingDirectory $appDir -WindowStyle Hidden
 }
 
 function Install-SelfUpdate {
@@ -1013,7 +1079,8 @@ function Install-SelfUpdate {
 
     try {
         Set-Status (T "downloading_update")
-        Invoke-WebRequest -Uri $Global:RemoteExeUrl -OutFile $newExe -UseBasicParsing -TimeoutSec 60
+        $exeUrl = "$($Global:RemoteExeUrl)?t=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())"
+        Invoke-WebRequest -Uri $exeUrl -OutFile $newExe -UseBasicParsing -TimeoutSec 120
 
         if (-not (Test-Path -LiteralPath $newExe)) {
             throw "Downloaded exe was not created."
@@ -1031,8 +1098,11 @@ function Install-SelfUpdate {
             $Global:Window.Close()
         }
 
-        [System.Windows.Application]::Current.Shutdown()
-        exit
+        try {
+            [System.Windows.Application]::Current.Shutdown()
+        } catch { }
+
+        Stop-Process -Id ([System.Diagnostics.Process]::GetCurrentProcess().Id) -Force
     } catch {
         if ($newExe) {
             Remove-Item -LiteralPath $newExe -Force -ErrorAction SilentlyContinue
@@ -1482,6 +1552,7 @@ function Build-UI {
 # =============================
 Load-Config
 Save-Config
+Refresh-DesktopShortcuts
 
 if ($LaunchProfile) {
     Start-ZaloProfile $LaunchProfile
