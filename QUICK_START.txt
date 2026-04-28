@@ -1,0 +1,11 @@
+﻿ZaloMulti quick start
+
+1. Upload all files to GitHub.
+2. Run Build-Exe.bat on Windows.
+3. It creates ZaloMulti.exe.
+4. Upload ZaloMulti.exe to release/ZaloMulti.exe.
+5. Send only ZaloMulti.exe to users.
+
+Author: Nguyễn Lê Khánh Hòa
+Website: https://koha.io.vn
+Version: 1.2.5
